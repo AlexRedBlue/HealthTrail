@@ -1,0 +1,8 @@
+## Interface: 16001
+## Title: Health Trail
+## Notes: Lingering "health lost" trail behind any nameplate's health bar.
+## Version: 1.0.0
+## Category: Nameplates
+## SavedVariables: HealthTrailDB
+
+HealthTrail.lua
