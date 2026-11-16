@@ -61,12 +61,36 @@ local function ScanForHealthBar(frame, depth, best)
     return best
 end
 
+-- Some region properties (e.g. draw layer of heal-prediction textures on
+-- Blizzard plates) come back as secret values, which can't be compared.
+local IsSecret = issecretvalue or function() return false end
+
+local function Plain(v)
+    if IsSecret(v) then return nil end
+    return v
+end
+
+-- Named background textures used by known nameplate layouts.
+local KNOWN_BG_KEYS = { "bgTexture", "background", "Background", "bg" }
+
 -- Hide the host bar's own background textures so the trail behind shows through.
 local function HideHostBackground(host)
+    local found = false
+    for _, key in ipairs(KNOWN_BG_KEYS) do
+        local tex = host[key]
+        if type(tex) == "table" and tex.SetAlpha and tex ~= host then
+            tex:SetAlpha(0)
+            found = true
+        end
+    end
+    if found then return end
+
+    -- Fallback: scan regions, skipping anything whose properties are secret.
     local fill = host:GetStatusBarTexture()
     for _, region in ipairs({ host:GetRegions() }) do
-        if region ~= fill and region:GetObjectType() == "Texture"
-            and region:GetDrawLayer() == "BACKGROUND" then
+        if region ~= fill
+            and Plain(region:GetObjectType()) == "Texture"
+            and Plain(region:GetDrawLayer()) == "BACKGROUND" then
             region:SetAlpha(0)
         end
     end
