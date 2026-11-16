@@ -1,0 +1,5 @@
+package-as: HealthTrail
+
+ignore:
+  - README.md
+  - .github
