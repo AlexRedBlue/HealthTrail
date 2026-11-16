@@ -1,15 +1,34 @@
 -- Health Trail: a lingering "health lost" bar behind any nameplate health bar.
--- Works with secret health values: nothing here compares or does math on health.
+-- Works with secret health values: the trail never compares or does math on health.
 -- Health values are only stored and passed to StatusBar:SetMinMaxValues/SetValue.
+-- Health ticks are placed by the game via invisible StatusBars, so they never read health either.
 
 local DEFAULTS = {
     linger = 0.6,                        -- seconds the lost chunk holds before draining
     trailColor = { 1, 0.85, 0.5, 0.9 },    -- pale gold
     bgColor = { 0, 0, 0, 0.6 },            -- replaces the host bar's background
+    showTicks = true,                      -- vertical divider lines on the health bar
 }
 
+local TICK_COLOR = { 0.25, 0.25, 0.25, 0.7 }        -- thin lines: dark grey
+local MAJOR_TICK_COLOR = { 0.2, 0.2, 0.2, 0.9 }     -- thick lines: slightly darker grey
+
+-- Line spacing by unit type. `lines` is how many thin lines are made, so lines
+-- cover health up to lines * minor (e.g. 100 lines of 100 = up to 10,000).
+local TICK_TIERS = {
+    player = { minor = 100,   major = 1000,   lines = 100 },
+    normal = { minor = 100,   major = 1000,   lines = 100 },
+    elite  = { minor = 1000,  major = 10000,  lines = 100 },
+    boss   = { minor = 10000, major = 100000, lines = 100 },
+}
+
+local TICK_WIDTH = 1        -- pixels
+local MAJOR_TICK_WIDTH = 2  -- pixels
+
 local db
-local trails = {} -- [plate] = { bar, host, unit, token, pending, timerRunning }
+local trails = {} -- [plate] = { bar, host, unit, token, pending, timerRunning, tickTier }
+local hostTicks = {} -- [host] = { holder, mask, lines = { { bar, tex, hp }, ... } }
+local tickErrorShown = false -- report a tick drawing error once per session
 local EASE = Enum.StatusBarInterpolation and Enum.StatusBarInterpolation.ExponentialEaseOut
 
 ---------------------------------------------------------------------------
@@ -97,6 +116,135 @@ local function HideHostBackground(host)
 end
 
 ---------------------------------------------------------------------------
+-- Health ticks
+-- Health values are secret, so line positions are never calculated. Each line
+-- is an invisible StatusBar covering the health bar, with min/max set to the
+-- unit's (secret) max health and its value set to a fixed amount (100, 200...).
+-- The line is drawn at the right edge of that bar's fill, so the game places
+-- it. A mask matching the health bar's fill limits the lines to current health
+-- (lines beyond max health clamp to the right edge and are hidden by it too).
+-- The line textures belong to the health bar itself, just above its fill, so
+-- the bar's text (a higher layer or a child frame) stays on top of them.
+---------------------------------------------------------------------------
+
+local function SetPixelWidth(tex, px)
+    if PixelUtil and PixelUtil.SetWidth then
+        PixelUtil.SetWidth(tex, px, px)
+    else
+        tex:SetWidth(px)
+    end
+end
+
+-- Line spacing by unit type (unit type isn't secret, health amount is).
+local function TierForUnit(unit)
+    if UnitIsPlayer(unit) then return TICK_TIERS.player end
+    local class = Plain(UnitClassification(unit))
+    local level = Plain(UnitLevel(unit))
+    if class == "worldboss" or (level == -1 and (class == "elite" or class == "rareelite")) then
+        return TICK_TIERS.boss
+    end
+    if class == "elite" or class == "rareelite" then return TICK_TIERS.elite end
+    return TICK_TIERS.normal
+end
+
+local WHITE = "Interface\\Buttons\\WHITE8X8"
+
+-- Draw layer for the lines: just above the host's fill texture, below text.
+local function LineLayer(host)
+    local fill = host:GetStatusBarTexture()
+    if fill then
+        local layer, sub = fill:GetDrawLayer()
+        layer, sub = Plain(layer), Plain(sub)
+        if layer and sub then return layer, math.min(sub + 1, 7) end
+    end
+    return "ARTWORK", 7
+end
+
+local function GetTicks(host)
+    local ticks = hostTicks[host]
+    if not ticks then
+        -- Holder for the invisible positioning bars (nothing visible in it).
+        local holder = CreateFrame("Frame", nil, host)
+        holder:SetAllPoints(host)
+        -- Mask to the bar's fill (current health), so lines only show on the
+        -- filled part. Also hides lines clamped past max health.
+        local mask = host:CreateMaskTexture()
+        mask:SetTexture(WHITE, "CLAMPTOBLACKADDITIVE", "CLAMPTOBLACKADDITIVE")
+        ticks = { holder = holder, mask = mask, lines = {} }
+        hostTicks[host] = ticks
+    end
+    return ticks
+end
+
+local function GetLine(ticks, host, i)
+    local line = ticks.lines[i]
+    if not line then
+        local bar = CreateFrame("StatusBar", nil, ticks.holder)
+        bar:SetAllPoints(host)
+        bar:SetStatusBarTexture(WHITE)
+        bar:SetStatusBarColor(0, 0, 0, 0) -- invisible; only its fill edge is used
+        local fill = bar:GetStatusBarTexture()
+        local layer, sublevel = LineLayer(host)
+        local tex = host:CreateTexture(nil, layer, nil, sublevel)
+        tex:SetTexture(WHITE) -- a file texture (not a color texture) so the mask applies
+        tex:AddMaskTexture(ticks.mask)
+        line = { bar = bar, tex = tex, fill = fill }
+        ticks.lines[i] = line
+    end
+    return line
+end
+
+local function HideTicks(host)
+    local ticks = host and hostTicks[host]
+    if not ticks then return end
+    for _, line in ipairs(ticks.lines) do line.tex:Hide() end
+end
+
+-- Pass a (possibly secret) max health to every line; no math on it.
+-- The value is reapplied after the range, since StatusBars clamp on SetValue.
+local function SetTicksMax(t, unit)
+    local ticks = t.host and hostTicks[t.host]
+    if not ticks or not t.tickTier then return end
+    local max = UnitHealthMax(unit)
+    for i = 1, t.tickTier.lines do
+        local line = ticks.lines[i]
+        line.bar:SetMinMaxValues(0, max)
+        line.bar:SetValue(line.hp)
+    end
+end
+
+local function SetupTicks(t, unit)
+    local host = t.host
+    local ticks = GetTicks(host)
+    local tier = TierForUnit(unit)
+    t.tickTier = tier
+
+    -- Re-anchor each time: some addons swap the fill texture when restyling.
+    local fill = host:GetStatusBarTexture()
+    ticks.mask:ClearAllPoints()
+    ticks.mask:SetAllPoints(fill or host)
+
+    for i, line in ipairs(ticks.lines) do
+        if i > tier.lines then line.bar:Hide(); line.tex:Hide() end
+    end
+    for i = 1, tier.lines do
+        local line = GetLine(ticks, host, i)
+        local hp = i * tier.minor
+        local isMajor = hp % tier.major == 0
+        line.tex:SetVertexColor(unpack(isMajor and MAJOR_TICK_COLOR or TICK_COLOR))
+        SetPixelWidth(line.tex, isMajor and MAJOR_TICK_WIDTH or TICK_WIDTH)
+        -- Thick lines span the full height; thin lines only the top half.
+        line.tex:ClearAllPoints()
+        line.tex:SetPoint("TOPLEFT", line.fill, "TOPRIGHT")
+        line.tex:SetPoint("BOTTOMLEFT", line.fill, isMajor and "BOTTOMRIGHT" or "RIGHT")
+        line.hp = hp
+        line.bar:Show()
+        line.tex:SetShown(db.showTicks)
+    end
+    SetTicksMax(t, unit) -- sets range, then each line's value
+end
+
+---------------------------------------------------------------------------
 -- Trail bars
 ---------------------------------------------------------------------------
 
@@ -117,6 +265,7 @@ local function GetTrail(plate, host)
     bar:SetStatusBarColor(unpack(db.trailColor))
     bar.bg:SetColorTexture(unpack(db.bgColor))
 
+    if t.host and t.host ~= host then HideTicks(t.host) end
     t.host = host
     bar:SetParent(host:GetParent())
     bar:ClearAllPoints()
@@ -146,6 +295,11 @@ local function Attach(unit)
     t.unit = unit
     HideHostBackground(host)
     Snap(t, unit)
+    local ok, err = pcall(SetupTicks, t, unit)
+    if not ok and not tickErrorShown then
+        tickErrorShown = true
+        print("Health Trail: could not draw ticks: " .. tostring(err))
+    end
 end
 
 local function Detach(unit)
@@ -156,9 +310,11 @@ local function Detach(unit)
     t.timerRunning = false
     t.unit = nil
     t.bar:Hide()
+    t.tickTier = nil
+    HideTicks(t.host)
 end
 
-local function OnHealth(unit)
+local function OnHealth(unit, event)
     local plate = C_NamePlate.GetNamePlateForUnit(unit)
     local t = plate and trails[plate]
     if not t or t.unit ~= unit then return end
@@ -166,6 +322,7 @@ local function OnHealth(unit)
     HideHostBackground(t.host)     -- some addons re-show their background
     t.bar:SetMinMaxValues(0, UnitHealthMax(unit))
     t.pending = UnitHealth(unit)   -- stored, never compared
+    if event == "UNIT_MAXHEALTH" then SetTicksMax(t, unit) end
 
     if t.timerRunning then return end
     t.timerRunning = true
@@ -201,6 +358,7 @@ f:SetScript("OnEvent", function(_, event, arg1)
         for k, v in pairs(DEFAULTS) do
             if db[k] == nil then db[k] = v end
         end
+        db.tickColor, db.majorTickColor = nil, nil -- now constants; drop old saved values
         f:UnregisterEvent("ADDON_LOADED")
     elseif not db then
         return
@@ -213,7 +371,7 @@ f:SetScript("OnEvent", function(_, event, arg1)
     elseif event == "NAME_PLATE_UNIT_REMOVED" then
         Detach(arg1)
     elseif arg1 and arg1:find("^nameplate") then
-        OnHealth(arg1)
+        OnHealth(arg1, event)
     end
 end)
 
@@ -223,11 +381,86 @@ end)
 
 SLASH_HEALTHTRAIL1 = "/healthtrail"
 SlashCmdList.HEALTHTRAIL = function(msg)
+    msg = strtrim(msg or ""):lower()
+    if msg == "debug" then
+        local function show(v)
+            if IsSecret(v) then return "<secret>" end
+            return tostring(v)
+        end
+        local plate = C_NamePlate.GetNamePlateForUnit("target")
+        if not plate then print("Health Trail debug: target has no nameplate"); return end
+        local t = trails[plate]
+        if not t or not t.host then print("Health Trail debug: no health bar attached to target's plate"); return end
+        local host, unit = t.host, t.unit
+        local fill = host:GetStatusBarTexture()
+        local ticks = hostTicks[host]
+        print("Health Trail debug:")
+        print("  unit:", show(unit), " health bar:", show(host:GetName() or "<unnamed>"))
+        if unit then
+            print("  health:", show(UnitHealth(unit)), " max:", show(UnitHealthMax(unit)))
+        end
+        print("  bar width:", show(host:GetWidth()), " fill width:", fill and show(fill:GetWidth()) or "<no fill>")
+        if unit then
+            print("  player:", show(UnitIsPlayer(unit)), " classification:", show(UnitClassification(unit)),
+                " level:", show(UnitLevel(unit)))
+        end
+        local tier = t.tickTier
+        print("  showTicks:", show(db.showTicks), " spacing:", tier and (tier.minor .. "/" .. tier.major) or "nil",
+            " lines:", tier and tier.lines or 0)
+        if ticks then
+            local first = ticks.lines[1]
+            if first then
+                local layer, sub = first.tex:GetDrawLayer()
+                print("  first line visible:", show(first.tex:IsVisible()), " width:", show(first.tex:GetWidth()),
+                    " layer:", show(layer), show(sub))
+            end
+            local fill = host:GetStatusBarTexture()
+            if fill then
+                local layer, sub = fill:GetDrawLayer()
+                print("  bar fill layer:", show(layer), show(sub))
+            end
+            for _, region in ipairs({ host:GetRegions() }) do
+                if Plain(region:GetObjectType()) == "FontString" then
+                    local layer, sub = region:GetDrawLayer()
+                    print("  text on bar:", show(region:GetText()), " layer:", show(layer), show(sub))
+                end
+            end
+        end
+        return
+    end
+
+    local tickArg = msg:match("^ticks?%s*(%a*)$")
+    if tickArg then
+        if tickArg == "on" then
+            db.showTicks = true
+        elseif tickArg == "off" then
+            db.showTicks = false
+        elseif tickArg == "" then
+            db.showTicks = not db.showTicks
+        else
+            print("Health Trail: usage /healthtrail ticks [on|off]")
+            return
+        end
+        print("Health Trail: health ticks " .. (db.showTicks and "on" or "off"))
+
+        for _, t in pairs(trails) do
+            if t.unit then
+                HideTicks(t.host)
+                if db.showTicks then
+                    local ok, err = pcall(SetupTicks, t, t.unit)
+                    if not ok then print("Health Trail: could not draw ticks: " .. tostring(err)) end
+                end
+            end
+        end
+        return
+    end
+
     local n = tonumber(msg)
     if n and n >= 0 and n <= 5 then
         db.linger = n
         print(("Health Trail: linger set to %.2f s"):format(n))
     else
-        print(("Health Trail: linger is %.2f s. Usage: /healthtrail <0-5>"):format(db.linger))
+        print(("Health Trail: linger is %.2f s, ticks are %s. Usage: /healthtrail <0-5> | ticks [on|off] | debug")
+            :format(db.linger, db.showTicks and "on" or "off"))
     end
 end
