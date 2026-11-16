@@ -1,7 +1,7 @@
-## Interface: 16001
+## Interface: 1799778
 ## Title: Health Trail
 ## Notes: Lingering "health lost" trail behind any nameplate's health bar.
-## Version: 1.0.0
+## Version: 1.0.2
 ## Category: Nameplates
 ## SavedVariables: HealthTrailDB
 
