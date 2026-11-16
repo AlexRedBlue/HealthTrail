@@ -1,5 +1,6 @@
-## Interface: 1799778
+## Version: @project-version@
 ## Title: Health Trail
+## X-Curse-Project-ID: 1799778
 ## Notes: Lingering "health lost" trail behind any nameplate's health bar.
 ## Version: 1.0.2
 ## Category: Nameplates
