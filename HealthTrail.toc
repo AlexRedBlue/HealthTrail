@@ -1,9 +1,9 @@
-## Version: @project-version@
+## Interface: 16001
 ## Title: Health Trail
-## X-Curse-Project-ID: 1799778
 ## Notes: Lingering "health lost" trail behind any nameplate's health bar.
-## Version: 1.0.2
+## Version: @project-version@
 ## Category: Nameplates
+## X-Curse-Project-ID: 1799778
 ## SavedVariables: HealthTrailDB
 
 HealthTrail.lua
