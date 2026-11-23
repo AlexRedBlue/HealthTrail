@@ -6,7 +6,7 @@ A lingering **"health lost"** trail for nameplates. When a mob takes damage, its
 
 ## Features
 
-*   **Works with any nameplate addon.** Plater and Blizzard's default nameplates are supported directly; most other nameplate addons are detected automatically.
+*   **Works with any nameplate addon.** Plater, Platynator and Blizzard's default nameplates are supported directly; most other nameplate addons are detected automatically.
 *   **Your current health is always accurate.** Only the trail lingers; the real health bar updates instantly.
 *   **Health ticks.** Thin half-height and thick full-height vertical lines on the filled part of the health bar make it easy to read how much health a target has left: every 100 / 1,000 health on players and normal mobs, every 1,000 / 10,000 on elites, and every 10,000 / 100,000 on bosses. In the options window, each mob type's thick-line spacing can be set to 10%, 25%, 50%, 200%, 400% or 1000% of the default, or any whole number, and the gap between thick lines can be split into 10, 4 or 2 thin lines.
 *   **Options window and minimap button.** Change the linger time, colours, tick spacing and how many tick lines each bar gets, without typing commands.
