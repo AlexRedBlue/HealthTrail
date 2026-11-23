@@ -190,23 +190,28 @@ local PRESET_LABELS = {
     ["200"] = "200%", ["400"] = "400%", ["1000"] = "1000%", custom = "Custom",
 }
 
+-- Drop a trailing ".0" (62.5 stays, 250.0 -> 250).
+local function Trim(x) return (("%.1f"):format(x):gsub("%.0$", "")) end
+
+-- Full number with thousands separators; one decimal if fractional.
 local function Num(n)
+    if n ~= math.floor(n) then return Trim(n) end
     if BreakUpLargeNumbers then return BreakUpLargeNumbers(n) end
     return tostring(n)
 end
 
 -- Short form for dropdown labels: 2500 -> 2.5k, 100000 -> 100k, 1000000 -> 1M.
 local function Short(n)
-    local function trim(x) return (("%.1f"):format(x):gsub("%.0$", "")) end
-    if n >= 1000000 then return trim(n / 1000000) .. "M" end
-    if n >= 1000 then return trim(n / 1000) .. "k" end
-    return tostring(n)
+    if n >= 1000000 then return Trim(n / 1000000) .. "M" end
+    if n >= 1000 then return Trim(n / 1000) .. "k" end
+    return Trim(n)
 end
 
 local function PresetText(kind, preset)
     if preset == "custom" then return "Custom" end
-    local minor = math.floor(ns.TICK_BASE[kind] * ns.TICK_PRESETS[preset] + 0.5)
-    return ("%s  (%s / %s)"):format(PRESET_LABELS[preset], Short(minor), Short(minor * ns.MajorEvery()))
+    -- Presets set the thick spacing; thin splits it into MajorEvery parts.
+    local major = math.floor(ns.TICK_BASE[kind] * ns.TICK_PRESETS[preset] + 0.5)
+    return ("%s  (%s / %s)"):format(PRESET_LABELS[preset], Short(major), Short(major / ns.MajorEvery()))
 end
 
 local dropdownCount = 0
@@ -296,8 +301,8 @@ local function CreateSpacingRow(parent, kind)
     box:SetNumeric(true) -- digits only, so whole numbers
     box:SetMaxLetters(8)
 
-    local thick = row:CreateFontString(nil, "ARTWORK", "GameFontDisableSmall")
-    thick:SetPoint("LEFT", box, "RIGHT", 6, 0)
+    local thinText = row:CreateFontString(nil, "ARTWORK", "GameFontDisableSmall")
+    thinText:SetPoint("LEFT", box, "RIGHT", 6, 0)
 
     local function Saved() return ns.db.tickSpacing[kind].custom end
     local function Apply(self)
@@ -315,15 +320,15 @@ local function CreateSpacingRow(parent, kind)
         self:ClearFocus()
     end)
     AddTooltip(box, "Custom spacing",
-        "Health between thin lines (whole number, at least 1). Thick lines follow the 'Thick line every' setting. Press Enter to apply.")
+        "Health between thick lines (whole number, at least 1). Thin lines split each gap using the 'Thick line every' setting. Press Enter to apply.")
 
     function row:Refresh()
         refreshDropdown()
         local custom = ns.db.tickSpacing[kind].preset == "custom"
         box:SetShown(custom)
-        thick:SetShown(custom)
+        thinText:SetShown(custom)
         if not box:HasFocus() then box:SetText(tostring(Saved())) end
-        thick:SetText("/ " .. Num(select(2, ns.TickSpacing(kind))))
+        thinText:SetText("/ " .. Num((ns.TickSpacing(kind)))) -- thin spacing
     end
     controls[#controls + 1] = row
     return row
@@ -450,14 +455,15 @@ local function CreateWindow()
         end)
     ratioDropdown:SetPoint("LEFT", ratioLabel, "RIGHT", 10 + ratioX, 0)
     AddTooltip(ratioDropdown, "Thick line every",
-        "How many thin lines between thick lines, for every mob type. For example, with 250 spacing: " ..
-        "10 gives thick lines every 2,500; 4 every 1,000; 2 every 500.")
+        "How many thin lines make up each gap between thick lines, for every mob type. Thick lines stay " ..
+        "where they are; thin lines re-space. For example, with thick lines every 1,000: 10 gives thin " ..
+        "lines every 100, 4 every 250, 2 every 500.")
     function ratioRow:Refresh() refreshRatio() end
     controls[#controls + 1] = ratioRow
 
     local spacingLabel = f:CreateFontString(nil, "ARTWORK", "GameFontNormal")
     spacingLabel:SetPoint("TOPLEFT", ratioRow, "BOTTOMLEFT", 0, -12)
-    spacingLabel:SetText("Line spacing (thin / thick)")
+    spacingLabel:SetText("Line spacing (thick / thin)")
 
     local previous = spacingLabel
     for _, kind in ipairs(ns.TICK_KINDS) do
