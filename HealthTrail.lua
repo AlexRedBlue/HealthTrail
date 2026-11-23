@@ -3,15 +3,38 @@
 -- Health values are only stored and passed to StatusBar:SetMinMaxValues/SetValue.
 -- Health ticks are placed by the game via invisible StatusBars, so they never read health either.
 
+local _, ns = ... -- shared with Options.lua and Minimap.lua
+
+local DB_VERSION = 1
+
 local DEFAULTS = {
     linger = 0.6,                        -- seconds the lost chunk holds before draining
     trailColor = { 1, 0.85, 0.5, 0.9 },    -- pale gold
     bgColor = { 0, 0, 0, 0.6 },            -- replaces the host bar's background
     showTicks = true,                      -- vertical divider lines on the health bar
+    tickColor = { 0.25, 0.25, 0.25, 0.7 }, -- thin lines: dark grey
+    majorTickColor = { 0.2, 0.2, 0.2, 0.9 }, -- thick lines: slightly darker grey
+    minimap = { hide = false, angle = 225 }, -- angle in degrees around the minimap
 }
+ns.DEFAULTS = DEFAULTS
 
-local TICK_COLOR = { 0.25, 0.25, 0.25, 0.7 }        -- thin lines: dark grey
-local MAJOR_TICK_COLOR = { 0.2, 0.2, 0.2, 0.9 }     -- thick lines: slightly darker grey
+local function Copy(v)
+    if type(v) ~= "table" then return v end
+    local c = {}
+    for k, x in pairs(v) do c[k] = Copy(x) end
+    return c
+end
+
+-- Fill missing keys (recursively) without overwriting saved values.
+local function ApplyDefaults(target, defaults)
+    for k, v in pairs(defaults) do
+        if target[k] == nil then
+            target[k] = Copy(v)
+        elseif type(v) == "table" and type(target[k]) == "table" and #v == 0 then
+            ApplyDefaults(target[k], v) -- nested settings table (not a colour array)
+        end
+    end
+end
 
 -- Line spacing by unit type. `lines` is how many thin lines are made, so lines
 -- cover health up to lines * minor (e.g. 100 lines of 100 = up to 10,000).
@@ -231,7 +254,7 @@ local function SetupTicks(t, unit)
         local line = GetLine(ticks, host, i)
         local hp = i * tier.minor
         local isMajor = hp % tier.major == 0
-        line.tex:SetVertexColor(unpack(isMajor and MAJOR_TICK_COLOR or TICK_COLOR))
+        line.tex:SetVertexColor(unpack(isMajor and db.majorTickColor or db.tickColor))
         SetPixelWidth(line.tex, isMajor and MAJOR_TICK_WIDTH or TICK_WIDTH)
         -- Thick lines span the full height; thin lines only the top half.
         line.tex:ClearAllPoints()
@@ -340,6 +363,37 @@ local function OnHealth(unit, event)
 end
 
 ---------------------------------------------------------------------------
+-- API for the options window and minimap button
+---------------------------------------------------------------------------
+
+-- Re-apply colours and ticks to every active nameplate after a setting changes.
+function ns.Refresh()
+    for _, t in pairs(trails) do
+        t.bar:SetStatusBarColor(unpack(db.trailColor))
+        t.bar.bg:SetColorTexture(unpack(db.bgColor))
+        if t.unit then
+            HideTicks(t.host)
+            local ok, err = pcall(SetupTicks, t, t.unit)
+            if not ok then print("Health Trail: could not draw ticks: " .. tostring(err)) end
+        end
+    end
+    if ns.RefreshOptions then ns.RefreshOptions() end
+end
+
+function ns.SetShowTicks(on)
+    db.showTicks = on and true or false
+    ns.Refresh()
+end
+
+-- Reset everything except the minimap button's position and visibility.
+function ns.ResetDefaults()
+    for k, v in pairs(DEFAULTS) do
+        if k ~= "minimap" then db[k] = Copy(v) end
+    end
+    ns.Refresh()
+end
+
+---------------------------------------------------------------------------
 -- Events
 ---------------------------------------------------------------------------
 
@@ -355,11 +409,17 @@ f:SetScript("OnEvent", function(_, event, arg1)
         if arg1 ~= "HealthTrail" then return end
         HealthTrailDB = HealthTrailDB or {}
         db = HealthTrailDB
-        for k, v in pairs(DEFAULTS) do
-            if db[k] == nil then db[k] = v end
+        if not db.version then
+            -- Pre-options builds saved black tick colours; start from the new grey.
+            db.tickColor, db.majorTickColor = nil, nil
         end
-        db.tickColor, db.majorTickColor = nil, nil -- now constants; drop old saved values
+        db.version = DB_VERSION
+        ApplyDefaults(db, DEFAULTS)
+        ns.db = db
         f:UnregisterEvent("ADDON_LOADED")
+
+        if ns.InitOptions then ns.InitOptions() end
+        if ns.InitMinimap then ns.InitMinimap() end
     elseif not db then
         return
     elseif event == "NAME_PLATE_UNIT_ADDED" then
@@ -442,15 +502,19 @@ SlashCmdList.HEALTHTRAIL = function(msg)
             return
         end
         print("Health Trail: health ticks " .. (db.showTicks and "on" or "off"))
+        ns.SetShowTicks(db.showTicks)
+        return
+    end
 
-        for _, t in pairs(trails) do
-            if t.unit then
-                HideTicks(t.host)
-                if db.showTicks then
-                    local ok, err = pcall(SetupTicks, t, t.unit)
-                    if not ok then print("Health Trail: could not draw ticks: " .. tostring(err)) end
-                end
-            end
+    if msg == "" or msg == "options" or msg == "config" then
+        if ns.ToggleOptions then ns.ToggleOptions() end
+        return
+    end
+
+    if msg == "minimap" then
+        if ns.SetMinimapShown then
+            ns.SetMinimapShown(db.minimap.hide) -- hidden -> show, shown -> hide
+            print("Health Trail: minimap button " .. (db.minimap.hide and "hidden" or "shown"))
         end
         return
     end
@@ -458,9 +522,14 @@ SlashCmdList.HEALTHTRAIL = function(msg)
     local n = tonumber(msg)
     if n and n >= 0 and n <= 5 then
         db.linger = n
+        if ns.RefreshOptions then ns.RefreshOptions() end
         print(("Health Trail: linger set to %.2f s"):format(n))
     else
-        print(("Health Trail: linger is %.2f s, ticks are %s. Usage: /healthtrail <0-5> | ticks [on|off] | debug")
-            :format(db.linger, db.showTicks and "on" or "off"))
+        print(("Health Trail: linger is %.2f s, ticks are %s."):format(db.linger, db.showTicks and "on" or "off"))
+        print("  /healthtrail - open options")
+        print("  /healthtrail <0-5> - set linger seconds")
+        print("  /healthtrail ticks [on|off] - health tick lines")
+        print("  /healthtrail minimap - show/hide the minimap button")
+        print("  /healthtrail debug - diagnose the target's nameplate")
     end
 end
