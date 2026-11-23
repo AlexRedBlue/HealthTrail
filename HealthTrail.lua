@@ -15,6 +15,17 @@ local DEFAULTS = {
     tickColor = { 0.25, 0.25, 0.25, 0.7 }, -- thin lines: dark grey
     majorTickColor = { 0.2, 0.2, 0.2, 0.9 }, -- thick lines: slightly darker grey
     minimap = { hide = false, angle = 225 }, -- angle in degrees around the minimap
+    maxTickLines = 100,                    -- thin lines made per bar (coverage vs. frames)
+    majorEvery = 10,                       -- a thick line every N thin lines: 10, 4 or 2
+    -- Per mob type: preset = "default" or a percent of the default spacing
+    -- ("10" .. "1000", see ns.TICK_PRESETS), or "custom" (uses `custom`).
+    -- Thick = thin x majorEvery.
+    tickSpacing = {
+        player = { preset = "default", custom = 100 },
+        normal = { preset = "default", custom = 100 },
+        elite  = { preset = "default", custom = 1000 },
+        boss   = { preset = "default", custom = 10000 },
+    },
 }
 ns.DEFAULTS = DEFAULTS
 
@@ -36,14 +47,40 @@ local function ApplyDefaults(target, defaults)
     end
 end
 
--- Line spacing by unit type. `lines` is how many thin lines are made, so lines
--- cover health up to lines * minor (e.g. 100 lines of 100 = up to 10,000).
-local TICK_TIERS = {
-    player = { minor = 100,   major = 1000,   lines = 100 },
-    normal = { minor = 100,   major = 1000,   lines = 100 },
-    elite  = { minor = 1000,  major = 10000,  lines = 100 },
-    boss   = { minor = 10000, major = 100000, lines = 100 },
+-- Default thin-line spacing by mob type (thick lines are majorEvery x this).
+local TICK_BASE = { player = 100, normal = 100, elite = 1000, boss = 10000 }
+ns.TICK_BASE = TICK_BASE
+ns.TICK_KINDS = { "player", "normal", "elite", "boss" } -- display order
+ns.TICK_PRESETS = {
+    ["10"] = 0.1, ["25"] = 0.25, ["50"] = 0.5, default = 1,
+    ["200"] = 2, ["400"] = 4, ["1000"] = 10,
 }
+ns.MAX_CUSTOM_SPACING = 10000000
+ns.MIN_TICK_LINES, ns.MAX_TICK_LINES = 50, 500
+ns.MAJOR_EVERY_CHOICES = { 10, 4, 2 }
+
+-- Thin lines per thick line, from the saved setting (falls back to 10).
+function ns.MajorEvery()
+    local n = ns.db.majorEvery
+    for _, choice in ipairs(ns.MAJOR_EVERY_CHOICES) do
+        if n == choice then return n end
+    end
+    return 10
+end
+
+-- Thin and thick line spacing for a mob type from the saved settings.
+function ns.TickSpacing(kind)
+    local s = ns.db.tickSpacing[kind] -- ns.db: this is defined above `local db`
+    local base = TICK_BASE[kind]
+    local minor
+    if s.preset == "custom" then
+        minor = math.floor(tonumber(s.custom) or base)
+        minor = math.max(1, math.min(minor, ns.MAX_CUSTOM_SPACING))
+    else
+        minor = math.floor(base * (ns.TICK_PRESETS[s.preset] or 1) + 0.5)
+    end
+    return minor, minor * ns.MajorEvery()
+end
 
 local TICK_WIDTH = 1        -- pixels
 local MAJOR_TICK_WIDTH = 2  -- pixels
@@ -158,16 +195,25 @@ local function SetPixelWidth(tex, px)
     end
 end
 
--- Line spacing by unit type (unit type isn't secret, health amount is).
-local function TierForUnit(unit)
-    if UnitIsPlayer(unit) then return TICK_TIERS.player end
+-- Mob type for line spacing (unit type isn't secret, health amount is).
+local function UnitKind(unit)
+    if UnitIsPlayer(unit) then return "player" end
     local class = Plain(UnitClassification(unit))
     local level = Plain(UnitLevel(unit))
     if class == "worldboss" or (level == -1 and (class == "elite" or class == "rareelite")) then
-        return TICK_TIERS.boss
+        return "boss"
     end
-    if class == "elite" or class == "rareelite" then return TICK_TIERS.elite end
-    return TICK_TIERS.normal
+    if class == "elite" or class == "rareelite" then return "elite" end
+    return "normal"
+end
+
+-- Spacing and line count for a unit, from the saved settings.
+local function TierForUnit(unit)
+    local kind = UnitKind(unit)
+    local minor, major = ns.TickSpacing(kind)
+    local lines = math.floor(tonumber(db.maxTickLines) or 100)
+    lines = math.max(ns.MIN_TICK_LINES, math.min(lines, ns.MAX_TICK_LINES))
+    return { kind = kind, minor = minor, major = major, lines = lines }
 end
 
 local WHITE = "Interface\\Buttons\\WHITE8X8"
@@ -380,6 +426,16 @@ function ns.Refresh()
     if ns.RefreshOptions then ns.RefreshOptions() end
 end
 
+-- Refresh shortly after the last call (for sliders being dragged).
+local refreshToken = 0
+function ns.QueueRefresh()
+    refreshToken = refreshToken + 1
+    local token = refreshToken
+    C_Timer.After(0.25, function()
+        if token == refreshToken then ns.Refresh() end
+    end)
+end
+
 function ns.SetShowTicks(on)
     db.showTicks = on and true or false
     ns.Refresh()
@@ -465,7 +521,8 @@ SlashCmdList.HEALTHTRAIL = function(msg)
                 " level:", show(UnitLevel(unit)))
         end
         local tier = t.tickTier
-        print("  showTicks:", show(db.showTicks), " spacing:", tier and (tier.minor .. "/" .. tier.major) or "nil",
+        print("  showTicks:", show(db.showTicks), " type:", tier and tier.kind or "nil",
+            " spacing:", tier and (tier.minor .. "/" .. tier.major) or "nil",
             " lines:", tier and tier.lines or 0)
         if ticks then
             local first = ticks.lines[1]
