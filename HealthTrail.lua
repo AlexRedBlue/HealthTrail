@@ -129,17 +129,34 @@ local function PlatynatorHealthBar(plate)
     end
 end
 
+-- Threat Plates keeps its frame in plate.TPFrame and the bar in
+-- visual.Healthbar. It restyles the bar when combat starts or ends (normal ->
+-- tank/dps styles: new texture, size and frame level) and hides it in
+-- name-only mode, so the bar is used even while hidden and watched for changes.
+local function ThreatPlatesHealthBar(plate)
+    local tp = plate.TPFrame
+    if type(tp) ~= "table" or not tp.IsForbidden or tp:IsForbidden() or not tp:IsVisible() then return end
+    local bar = type(tp.visual) == "table" and tp.visual.Healthbar
+    if IsStatusBar(bar) and not bar:IsForbidden() then
+        return bar, { layout = "Threat Plates", bg = bar.Background, followStyle = true }
+    end
+end
+
 -- Known layouts first (checked for visibility, so a hidden Blizzard frame
 -- underneath a replacement addon is ignored).
--- Returns the bar and optional extras: { layout, bg, clipMask }.
+-- Returns the bar and optional extras: { layout, bg, clipMask, followRange, followStyle }.
 local function KnownHealthBar(plate)
     local bar, info = PlatynatorHealthBar(plate)
+    if bar then return bar, info end
+    bar, info = ThreatPlatesHealthBar(plate)
     if bar then return bar, info end
     local candidates = {}
     if plate.unitFrame then                              -- Plater
         candidates[#candidates + 1] = plate.unitFrame.healthBar
     end
-    if plate.UnitFrame then                              -- Blizzard default
+    -- Blizzard default. Only while it's still on the plate: some addons hide it
+    -- by unparenting it, which leaves it "visible" but off screen.
+    if plate.UnitFrame and plate.UnitFrame:GetParent() == plate then
         candidates[#candidates + 1] = plate.UnitFrame.healthBar
         local c = plate.UnitFrame.HealthBarsContainer
         if c then candidates[#candidates + 1] = c.healthBar end
@@ -350,8 +367,11 @@ local function SetupTicks(t, unit)
     for i, line in ipairs(ticks.lines) do
         if i > tier.lines then line.bar:Hide(); line.tex:Hide() end
     end
+    -- The fill's layer can change with a restyle; keep lines just above it.
+    local layer, sublevel = LineLayer(host)
     for i = 1, tier.lines do
         local line = GetLine(ticks, host, i)
+        line.tex:SetDrawLayer(layer, sublevel)
         -- Every `every`-th line is thick. Computed from the whole-number thick
         -- spacing, since thin spacing can be fractional.
         local hp = i * tier.major / tier.every
@@ -377,7 +397,7 @@ end
 -- change the bar's max when absorb shields come and go; the values are passed
 -- straight through, so they may be secret.
 local hostTrail = {}   -- [host] = trail currently attached to it
-local hookedHosts = {} -- hosts whose SetMinMaxValues is already hooked
+local hookedHosts = {} -- [host] = { range = true, style = true } hooks already added
 
 local function OnHostRange(host, lo, hi)
     local t = hostTrail[host]
@@ -400,6 +420,63 @@ local function SetTrailClipMask(t, mask)
     t.clipMask = mask
 end
 
+-- Put the trail directly behind its host bar (same size, strata, one level down).
+local function PlaceTrail(t)
+    local bar, host = t.bar, t.host
+    bar:SetParent(host:GetParent())
+    bar:ClearAllPoints()
+    bar:SetAllPoints(host)
+    bar:SetFrameStrata(host:GetFrameStrata())
+    bar:SetFrameLevel(math.max(host:GetFrameLevel() - 1, 0))
+end
+
+-- Redo placement, background and ticks after the host addon restyled its bar.
+local function Resync(t)
+    t.resyncQueued = false
+    if not t.unit then return end
+    PlaceTrail(t)
+    t.bar:SetShown(t.host:IsShown())
+    HideHostBackground(t.host, t.info)
+    HideTicks(t.host)
+    local ok, err = pcall(SetupTicks, t, t.unit)
+    if not ok and not tickErrorShown then
+        tickErrorShown = true
+        print("Health Trail: could not draw ticks: " .. tostring(err))
+    end
+end
+
+-- A restyle calls several of the hooked methods in a row; resync once, a
+-- frame later, after the addon has finished.
+local function OnHostRestyle(host)
+    local t = hostTrail[host]
+    if not t or not t.unit or t.host ~= host or t.resyncQueued then return end
+    t.resyncQueued = true
+    C_Timer.After(0, function()
+        if t.host == host then Resync(t) else t.resyncQueued = false end
+    end)
+end
+
+-- Hooks only on addon bars that need them (never Blizzard's secure bars).
+local function HookHost(host, info)
+    if not info then return end
+    local hooks = hookedHosts[host]
+    if not hooks then
+        hooks = {}
+        hookedHosts[host] = hooks
+    end
+    if info.followRange and not hooks.range then
+        hooks.range = true
+        hooksecurefunc(host, "SetMinMaxValues", OnHostRange)
+    end
+    if info.followStyle and not hooks.style then
+        hooks.style = true
+        hooksecurefunc(host, "SetStatusBarTexture", OnHostRestyle)
+        hooksecurefunc(host, "SetSize", OnHostRestyle)
+        hooksecurefunc(host, "Show", OnHostRestyle)
+        hooksecurefunc(host, "Hide", OnHostRestyle)
+    end
+end
+
 local function GetTrail(plate, host, info)
     local t = trails[plate]
     if not t then
@@ -413,9 +490,8 @@ local function GetTrail(plate, host, info)
         trails[plate] = t
     end
 
-    local bar = t.bar
-    bar:SetStatusBarColor(unpack(db.trailColor))
-    bar.bg:SetColorTexture(unpack(db.bgColor))
+    t.bar:SetStatusBarColor(unpack(db.trailColor))
+    t.bar.bg:SetColorTexture(unpack(db.bgColor))
 
     if t.host and t.host ~= host then
         HideTicks(t.host)
@@ -424,17 +500,9 @@ local function GetTrail(plate, host, info)
     t.host = host
     t.info = info
     hostTrail[host] = t
-    -- Only for addon bars known to change range (never Blizzard's secure bars).
-    if info and info.followRange and not hookedHosts[host] then
-        hookedHosts[host] = true
-        hooksecurefunc(host, "SetMinMaxValues", OnHostRange)
-    end
+    HookHost(host, info)
     SetTrailClipMask(t, info and info.clipMask)
-    bar:SetParent(host:GetParent())
-    bar:ClearAllPoints()
-    bar:SetAllPoints(host)
-    bar:SetFrameStrata(host:GetFrameStrata())
-    bar:SetFrameLevel(math.max(host:GetFrameLevel() - 1, 0))
+    PlaceTrail(t)
     return t
 end
 
@@ -444,7 +512,7 @@ local function Snap(t, unit)
     t.pending = nil
     t.bar:SetMinMaxValues(0, HostMax(t, unit))
     t.bar:SetValue(UnitHealth(unit))
-    t.bar:Show()
+    t.bar:SetShown(t.host:IsShown()) -- e.g. Threat Plates' name-only mode hides the bar
 end
 
 local function Attach(unit)
