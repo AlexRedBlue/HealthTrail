@@ -106,9 +106,35 @@ local function Usable(bar)
     return IsStatusBar(bar) and not bar:IsForbidden() and bar:IsVisible() and not bar.isHealthTrail
 end
 
+-- Platynator hides Blizzard's frame and adds its own display to the plate:
+-- a frame with a `widgets` list, where the health widget (details.kind ==
+-- "health") holds the real bar in `statusBar`. Its bars are unnamed and it has
+-- invisible absorb/cutaway bars of the same size, so the scan can't tell them
+-- apart. Its background and border mask live on the widget, not the bar.
+local function PlatynatorHealthBar(plate)
+    for _, display in ipairs({ plate:GetChildren() }) do
+        if not display:IsForbidden() and type(display.widgets) == "table" and display:IsVisible() then
+            for _, w in ipairs(display.widgets) do
+                local d = type(w) == "table" and w.details
+                if type(d) == "table" and d.kind == "health" and Usable(w.statusBar) then
+                    return w.statusBar, {
+                        layout = "Platynator",
+                        bg = w.background,
+                        clipMask = w.mask,
+                        followRange = true, -- its max includes absorb shields
+                    }
+                end
+            end
+        end
+    end
+end
+
 -- Known layouts first (checked for visibility, so a hidden Blizzard frame
 -- underneath a replacement addon is ignored).
+-- Returns the bar and optional extras: { layout, bg, clipMask }.
 local function KnownHealthBar(plate)
+    local bar, info = PlatynatorHealthBar(plate)
+    if bar then return bar, info end
     local candidates = {}
     if plate.unitFrame then                              -- Plater
         candidates[#candidates + 1] = plate.unitFrame.healthBar
@@ -156,7 +182,11 @@ end
 local KNOWN_BG_KEYS = { "bgTexture", "background", "Background", "bg" }
 
 -- Hide the host bar's own background textures so the trail behind shows through.
-local function HideHostBackground(host)
+local function HideHostBackground(host, info)
+    if info and info.bg and info.bg.SetAlpha then
+        info.bg:SetAlpha(0)
+        return
+    end
     local found = false
     for _, key in ipairs(KNOWN_BG_KEYS) do
         local tex = host[key]
@@ -232,8 +262,16 @@ local function LineLayer(host)
     return "ARTWORK", 7
 end
 
-local function GetTicks(host)
+local function GetTicks(host, clipMask)
     local ticks = hostTicks[host]
+    if ticks and ticks.clipMask ~= clipMask then
+        -- Layout changed for this bar: swap the shape mask on existing lines.
+        for _, line in ipairs(ticks.lines) do
+            if ticks.clipMask then line.tex:RemoveMaskTexture(ticks.clipMask) end
+            if clipMask then line.tex:AddMaskTexture(clipMask) end
+        end
+        ticks.clipMask = clipMask
+    end
     if not ticks then
         -- Holder for the invisible positioning bars (nothing visible in it).
         local holder = CreateFrame("Frame", nil, host)
@@ -242,7 +280,9 @@ local function GetTicks(host)
         -- filled part. Also hides lines clamped past max health.
         local mask = host:CreateMaskTexture()
         mask:SetTexture(WHITE, "CLAMPTOBLACKADDITIVE", "CLAMPTOBLACKADDITIVE")
-        ticks = { holder = holder, mask = mask, lines = {} }
+        -- clipMask: the host's own bar-shape mask (e.g. Platynator's rounded
+        -- borders), so lines don't poke out past the corners.
+        ticks = { holder = holder, mask = mask, clipMask = clipMask, lines = {} }
         hostTicks[host] = ticks
     end
     return ticks
@@ -260,6 +300,7 @@ local function GetLine(ticks, host, i)
         local tex = host:CreateTexture(nil, layer, nil, sublevel)
         tex:SetTexture(WHITE) -- a file texture (not a color texture) so the mask applies
         tex:AddMaskTexture(ticks.mask)
+        if ticks.clipMask then tex:AddMaskTexture(ticks.clipMask) end
         line = { bar = bar, tex = tex, fill = fill }
         ticks.lines[i] = line
     end
@@ -272,12 +313,22 @@ local function HideTicks(host)
     for _, line in ipairs(ticks.lines) do line.tex:Hide() end
 end
 
+-- The health bar's own (possibly secret) max. Not always UnitHealthMax:
+-- Platynator, for one, adds absorb shields to the bar's max. Read from the
+-- bar so the trail and ticks always line up with what it draws.
+local function HostMax(t, unit)
+    local _, max = t.host:GetMinMaxValues()
+    -- Only a plain value may be compared; a secret max is always usable.
+    if not IsSecret(max) and max == nil then max = UnitHealthMax(unit) end
+    return max
+end
+
 -- Pass a (possibly secret) max health to every line; no math on it.
 -- The value is reapplied after the range, since StatusBars clamp on SetValue.
 local function SetTicksMax(t, unit)
     local ticks = t.host and hostTicks[t.host]
     if not ticks or not t.tickTier then return end
-    local max = UnitHealthMax(unit)
+    local max = HostMax(t, unit)
     for i = 1, t.tickTier.lines do
         local line = ticks.lines[i]
         line.bar:SetMinMaxValues(0, max)
@@ -287,7 +338,7 @@ end
 
 local function SetupTicks(t, unit)
     local host = t.host
-    local ticks = GetTicks(host)
+    local ticks = GetTicks(host, t.info and t.info.clipMask)
     local tier = TierForUnit(unit)
     t.tickTier = tier
 
@@ -322,7 +373,34 @@ end
 -- Trail bars
 ---------------------------------------------------------------------------
 
-local function GetTrail(plate, host)
+-- Keep the trail's range in step with its host bar. Some addons (Platynator)
+-- change the bar's max when absorb shields come and go; the values are passed
+-- straight through, so they may be secret.
+local hostTrail = {}   -- [host] = trail currently attached to it
+local hookedHosts = {} -- hosts whose SetMinMaxValues is already hooked
+
+local function OnHostRange(host, lo, hi)
+    local t = hostTrail[host]
+    if t and t.unit and t.host == host then
+        t.bar:SetMinMaxValues(lo, hi)
+    end
+end
+
+local function SetTrailClipMask(t, mask)
+    if t.clipMask == mask then return end
+    local fill, bg = t.bar:GetStatusBarTexture(), t.bar.bg
+    if t.clipMask then
+        fill:RemoveMaskTexture(t.clipMask)
+        bg:RemoveMaskTexture(t.clipMask)
+    end
+    if mask then
+        fill:AddMaskTexture(mask)
+        bg:AddMaskTexture(mask)
+    end
+    t.clipMask = mask
+end
+
+local function GetTrail(plate, host, info)
     local t = trails[plate]
     if not t then
         local bar = CreateFrame("StatusBar")
@@ -339,8 +417,19 @@ local function GetTrail(plate, host)
     bar:SetStatusBarColor(unpack(db.trailColor))
     bar.bg:SetColorTexture(unpack(db.bgColor))
 
-    if t.host and t.host ~= host then HideTicks(t.host) end
+    if t.host and t.host ~= host then
+        HideTicks(t.host)
+        if hostTrail[t.host] == t then hostTrail[t.host] = nil end
+    end
     t.host = host
+    t.info = info
+    hostTrail[host] = t
+    -- Only for addon bars known to change range (never Blizzard's secure bars).
+    if info and info.followRange and not hookedHosts[host] then
+        hookedHosts[host] = true
+        hooksecurefunc(host, "SetMinMaxValues", OnHostRange)
+    end
+    SetTrailClipMask(t, info and info.clipMask)
     bar:SetParent(host:GetParent())
     bar:ClearAllPoints()
     bar:SetAllPoints(host)
@@ -353,7 +442,7 @@ local function Snap(t, unit)
     t.token = t.token + 1          -- cancels any pending drain
     t.timerRunning = false
     t.pending = nil
-    t.bar:SetMinMaxValues(0, UnitHealthMax(unit))
+    t.bar:SetMinMaxValues(0, HostMax(t, unit))
     t.bar:SetValue(UnitHealth(unit))
     t.bar:Show()
 end
@@ -362,12 +451,13 @@ local function Attach(unit)
     local plate = C_NamePlate.GetNamePlateForUnit(unit)
     if not plate or plate:IsForbidden() then return end
 
-    local host = KnownHealthBar(plate) or ScanForHealthBar(plate, 1, nil)
+    local host, info = KnownHealthBar(plate)
+    if not host then host = ScanForHealthBar(plate, 1, nil) end
     if not host then return end
 
-    local t = GetTrail(plate, host)
+    local t = GetTrail(plate, host, info)
     t.unit = unit
-    HideHostBackground(host)
+    HideHostBackground(host, info)
     Snap(t, unit)
     local ok, err = pcall(SetupTicks, t, unit)
     if not ok and not tickErrorShown then
@@ -393,10 +483,17 @@ local function OnHealth(unit, event)
     local t = plate and trails[plate]
     if not t or t.unit ~= unit then return end
 
-    HideHostBackground(t.host)     -- some addons re-show their background
-    t.bar:SetMinMaxValues(0, UnitHealthMax(unit))
+    HideHostBackground(t.host, t.info) -- some addons re-show their background
+    t.bar:SetMinMaxValues(0, HostMax(t, unit))
     t.pending = UnitHealth(unit)   -- stored, never compared
-    if event == "UNIT_MAXHEALTH" then SetTicksMax(t, unit) end
+    if event == "UNIT_MAXHEALTH" or event == "UNIT_ABSORB_AMOUNT_CHANGED" then
+        -- The bar's max may include shields. Wait a frame so the nameplate
+        -- addon has updated its bar before reading the range from it.
+        C_Timer.After(0, function()
+            if t.unit == unit then SetTicksMax(t, unit) end
+        end)
+        if event == "UNIT_ABSORB_AMOUNT_CHANGED" then return end -- health unchanged
+    end
 
     if t.timerRunning then return end
     t.timerRunning = true
@@ -464,6 +561,7 @@ f:RegisterEvent("NAME_PLATE_UNIT_ADDED")
 f:RegisterEvent("NAME_PLATE_UNIT_REMOVED")
 f:RegisterEvent("UNIT_HEALTH")
 f:RegisterEvent("UNIT_MAXHEALTH")
+f:RegisterEvent("UNIT_ABSORB_AMOUNT_CHANGED")
 
 f:SetScript("OnEvent", function(_, event, arg1)
     if event == "ADDON_LOADED" then
@@ -526,7 +624,8 @@ SlashCmdList.HEALTHTRAIL = function(msg)
         local fill = host:GetStatusBarTexture()
         local ticks = hostTicks[host]
         print("Health Trail debug:")
-        print("  unit:", show(unit), " health bar:", show(host:GetName() or "<unnamed>"))
+        print("  unit:", show(unit), " health bar:", show(host:GetName() or "<unnamed>"),
+            " layout:", t.info and t.info.layout or "generic")
         if unit then
             print("  health:", show(UnitHealth(unit)), " max:", show(UnitHealthMax(unit)))
         end
