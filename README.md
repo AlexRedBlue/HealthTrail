@@ -9,15 +9,20 @@ A lingering **"health lost"** trail for nameplates. When a mob takes damage, its
 *   **Works with any nameplate addon.** Plater and Blizzard's default nameplates are supported directly; most other nameplate addons are detected automatically.
 *   **Your current health is always accurate.** Only the trail lingers; the real health bar updates instantly.
 *   **Health ticks.** Thin half-height and thick full-height vertical lines on the filled part of the health bar make it easy to read how much health a target has left: every 100 / 1,000 health on players and normal mobs, every 1,000 / 10,000 on elites, and every 10,000 / 100,000 on bosses.
-*   **Lightweight.** No libraries, no configuration window, one small file.
+*   **Options window and minimap button.** Change the linger time, colours and health ticks without typing commands.
+*   **Lightweight.** No libraries.
 
 ## Usage
 
-Install and play - no setup needed.
+Install and play - no setup needed. To change settings, left-click the minimap button, type `/healthtrail`, or find Health Trail in the game's AddOns settings.
 
-*   `/healthtrail` - show the current linger time
+Minimap button: **left-click** opens options, **right-click** toggles health ticks, **drag** moves it around the minimap.
+
+*   `/healthtrail` - open the options window
 *   `/healthtrail 1.2` - set how many seconds the lost chunk holds before draining (0–5, saved between sessions)
 *   `/healthtrail ticks` - turn the health tick lines on or off (or `/healthtrail ticks on` / `off`)
+*   `/healthtrail minimap` - show or hide the minimap button
+*   `/healthtrail help` - list commands
 
 ## Notes
 

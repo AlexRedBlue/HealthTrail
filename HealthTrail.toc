@@ -5,5 +5,9 @@
 ## Category: Nameplates
 ## X-Curse-Project-ID: 1799778
 ## SavedVariables: HealthTrailDB
+## IconTexture: Interface\Icons\Spell_Holy_FlashHeal
+## AddonCompartmentFunc: HealthTrail_OnAddonCompartmentClick
 
 HealthTrail.lua
+Options.lua
+Minimap.lua
