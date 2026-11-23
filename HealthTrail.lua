@@ -5,7 +5,7 @@
 
 local _, ns = ... -- shared with Options.lua and Minimap.lua
 
-local DB_VERSION = 1
+local DB_VERSION = 2
 
 local DEFAULTS = {
     linger = 0.6,                        -- seconds the lost chunk holds before draining
@@ -19,12 +19,12 @@ local DEFAULTS = {
     majorEvery = 10,                       -- a thick line every N thin lines: 10, 4 or 2
     -- Per mob type: preset = "default" or a percent of the default spacing
     -- ("10" .. "1000", see ns.TICK_PRESETS), or "custom" (uses `custom`).
-    -- Thick = thin x majorEvery.
+    -- These set the THICK line spacing; thin = thick / majorEvery.
     tickSpacing = {
-        player = { preset = "default", custom = 100 },
-        normal = { preset = "default", custom = 100 },
-        elite  = { preset = "default", custom = 1000 },
-        boss   = { preset = "default", custom = 10000 },
+        player = { preset = "default", custom = 1000 },
+        normal = { preset = "default", custom = 1000 },
+        elite  = { preset = "default", custom = 10000 },
+        boss   = { preset = "default", custom = 100000 },
     },
 }
 ns.DEFAULTS = DEFAULTS
@@ -47,8 +47,9 @@ local function ApplyDefaults(target, defaults)
     end
 end
 
--- Default thin-line spacing by mob type (thick lines are majorEvery x this).
-local TICK_BASE = { player = 100, normal = 100, elite = 1000, boss = 10000 }
+-- Default thick-line spacing by mob type. Thin lines split each thick
+-- interval into majorEvery parts.
+local TICK_BASE = { player = 1000, normal = 1000, elite = 10000, boss = 100000 }
 ns.TICK_BASE = TICK_BASE
 ns.TICK_KINDS = { "player", "normal", "elite", "boss" } -- display order
 ns.TICK_PRESETS = {
@@ -69,17 +70,19 @@ function ns.MajorEvery()
 end
 
 -- Thin and thick line spacing for a mob type from the saved settings.
+-- The preset/custom value is the thick spacing; thin = thick / majorEvery,
+-- which may be fractional (e.g. 250 / 4 = 62.5) - StatusBars accept that.
 function ns.TickSpacing(kind)
     local s = ns.db.tickSpacing[kind] -- ns.db: this is defined above `local db`
     local base = TICK_BASE[kind]
-    local minor
+    local major
     if s.preset == "custom" then
-        minor = math.floor(tonumber(s.custom) or base)
-        minor = math.max(1, math.min(minor, ns.MAX_CUSTOM_SPACING))
+        major = math.floor(tonumber(s.custom) or base)
+        major = math.max(1, math.min(major, ns.MAX_CUSTOM_SPACING))
     else
-        minor = math.floor(base * (ns.TICK_PRESETS[s.preset] or 1) + 0.5)
+        major = math.floor(base * (ns.TICK_PRESETS[s.preset] or 1) + 0.5)
     end
-    return minor, minor * ns.MajorEvery()
+    return major / ns.MajorEvery(), major
 end
 
 local TICK_WIDTH = 1        -- pixels
@@ -213,7 +216,7 @@ local function TierForUnit(unit)
     local minor, major = ns.TickSpacing(kind)
     local lines = math.floor(tonumber(db.maxTickLines) or 100)
     lines = math.max(ns.MIN_TICK_LINES, math.min(lines, ns.MAX_TICK_LINES))
-    return { kind = kind, minor = minor, major = major, lines = lines }
+    return { kind = kind, minor = minor, major = major, every = ns.MajorEvery(), lines = lines }
 end
 
 local WHITE = "Interface\\Buttons\\WHITE8X8"
@@ -298,8 +301,10 @@ local function SetupTicks(t, unit)
     end
     for i = 1, tier.lines do
         local line = GetLine(ticks, host, i)
-        local hp = i * tier.minor
-        local isMajor = hp % tier.major == 0
+        -- Every `every`-th line is thick. Computed from the whole-number thick
+        -- spacing, since thin spacing can be fractional.
+        local hp = i * tier.major / tier.every
+        local isMajor = i % tier.every == 0
         line.tex:SetVertexColor(unpack(isMajor and db.majorTickColor or db.tickColor))
         SetPixelWidth(line.tex, isMajor and MAJOR_TICK_WIDTH or TICK_WIDTH)
         -- Thick lines span the full height; thin lines only the top half.
@@ -468,6 +473,16 @@ f:SetScript("OnEvent", function(_, event, arg1)
         if not db.version then
             -- Pre-options builds saved black tick colours; start from the new grey.
             db.tickColor, db.majorTickColor = nil, nil
+        end
+        if (db.version or 0) < 2 and type(db.tickSpacing) == "table" then
+            -- Version 1 saved custom values as THIN spacing; convert to thick.
+            local every = db.majorEvery
+            if every ~= 10 and every ~= 4 and every ~= 2 then every = 10 end
+            for _, s in pairs(db.tickSpacing) do
+                if type(s) == "table" and tonumber(s.custom) then
+                    s.custom = math.floor(tonumber(s.custom) * every)
+                end
+            end
         end
         db.version = DB_VERSION
         ApplyDefaults(db, DEFAULTS)
